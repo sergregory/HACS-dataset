@@ -17,12 +17,14 @@ import csv
 import argparse
 from multiprocessing import Pool
 from functools import partial
+from tqdm.contrib.concurrent import process_map
+from tqdm import tqdm
 
 
 def download_to_tmp(vid, tmp_video):
     url = 'https://www.youtube.com/watch?v={}'.format(vid)
-    cmd = ['youtube-dl', '-q', '-f', 'mp4', '-o', tmp_video, url]
-    subprocess.call(cmd)
+    cmd = ['yt-dlp', '-q', '-f', 'mp4', '-o', tmp_video, url]
+    subprocess.call(cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
 
 def probe_res(video):
@@ -77,28 +79,31 @@ def process_missing(video, args):
         return
     try:
         urllib.request.urlretrieve(url, output_path)
-        print("processed {} file".format(output_path))
+        tqdm.write("processed {} file".format(output_path))
     except Exception as e:
-        print("Error processing {} file with error {}".format(url, e))
+        tqdm.write("Error processing {} file with error {}".format(url, e))
 
-def process(video, args):
-    vid, classname = video
-    basename = 'v_{}.mp4'.format(vid)
-    folder = os.path.join(args.root_dir, classname)
-    if not os.path.isdir(folder):
-        os.mkdir(folder)
-    tmp_video = os.path.join(args.tmp_dir, basename)
-    resized_video = os.path.join(folder, basename)
-    if os.path.exists(resized_video):
-        return
+def process(n, num_proc, args, videos):
+    videos_to_process = videos[n * len(videos) // num_proc : min((n+1) * len(videos) // num_proc, len(videos))]
 
-    try:
-        download_to_tmp(vid, tmp_video)
-        resize_move(tmp_video, resized_video, args.shortside)
-        print('Processed [{}/{}]'.format(classname, vid))
-    except Exception as e:
-        print('Error processing [{}/{}]: {}'.format(classname, vid, e))
+    for video in tqdm(videos_to_process, position=n+1):
+        vid, classname = video
+        basename = 'v_{}.mp4'.format(vid)
+        folder = os.path.join(args.root_dir, classname)
+        if not os.path.isdir(folder):
+            os.mkdir(folder)
+        tmp_video = os.path.join(args.tmp_dir, basename)
+        resized_video = os.path.join(folder, basename)
+        if os.path.exists(resized_video):
+            continue
 
+        try:
+            download_to_tmp(vid, tmp_video)
+            resize_move(tmp_video, resized_video, args.shortside)
+            # tqdm.write('Processed [{}/{}]'.format(classname, vid))
+        except Exception as e:
+            pass
+            # tqdm.write('Error processing [{}/{}]: {}'.format(classname, vid, e))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -165,15 +170,14 @@ if __name__ == "__main__":
         videos = list(videos)
         random.shuffle(videos)
         if args.num_worker > 1:
-            pool = Pool(args.num_worker)
-            pool.map(partial(process, args=args), videos)
+            process_ids = list(range(args.num_worker))
+            process_map(partial(process, num_proc=args.num_worker, args=args, videos=videos), process_ids, max_workers=args.num_worker)
         else:
             for video in videos:
-                process(video, args)
+                process(0, 1, args, videos)
     elif args.dataset == 'missing':
         if args.num_worker > 1:
-            pool = Pool(args.num_worker)
-            pool.map(partial(process_missing, args=args), videos)
+            process_map(partial(process_missing, args=args), videos, max_workers=args.num_worker)
         else:
             for video in videos:
                 process_missing(video, args)
